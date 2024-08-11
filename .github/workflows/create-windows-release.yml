@@ -22,7 +22,7 @@ on:
   workflow_dispatch: # Allows manual triggering of the workflow
     inputs:
       release_name:
-        description: 'Release name for the release and archive file.'
+        description: 'The name for both the Release and the created Tag, and the archive file.'
         required: true
 
 jobs:
@@ -109,4 +109,4 @@ jobs:
         with:
           name: Forge Release ${{ github.event.inputs.release_name }}
           artifacts: "sd_forge_${{ github.event.inputs.release_name }}.7z"
-          tag: ${{ github.ref_name }}
+          tag: ${{ github.event.inputs.release_name }}
