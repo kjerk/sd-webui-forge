@@ -2,4 +2,4 @@
 
 call _Config_Variables.bat
 
-cmd /k "%DIR_MINIFORGE%\condabin\activate.bat"
+call "%DIR_MINIFORGE%\condabin\activate.bat"
