@@ -1,0 +1,4 @@
+name: Build Standalone SD-Forge | Win-x64
+
+on: 
+   push:
