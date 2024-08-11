@@ -37,6 +37,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: "${{ env.DIR_WEBUI }}"
+          persist-credentials: false
 
       # ! 2. Download and Install Miniforge3 portable
       - name: Install Miniforge3
