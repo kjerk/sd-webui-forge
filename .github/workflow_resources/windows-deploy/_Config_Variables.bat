@@ -11,12 +11,8 @@ SET FORGE_FLAGS=--skip-version-check ^
   --skip-torch-cuda-test ^
   --skip-python-version-check ^
   --skip-load-model-at-start ^
-  --vae-in-bf16 ^
   --disable-xformers ^
-  --attention-pytorch ^
-  --opt-channelslast ^
-  --cuda-malloc ^
-  --cuda-stream
+  --no-download-sd-model
 
 :banner
 
