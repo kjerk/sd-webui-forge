@@ -1,5 +1,8 @@
 name: Build Standalone SD-Forge | Win-x64
 
+# This script will check out the repository into a subdirectory and create a portable install alongside of Miniforge3 with a bootstrapped environment.
+# Then scripts to launch and control Forge are copied from a resources folder and that is the final deployable portable package.
+
 env:
   DIR_MINIFORGE: "Miniforge3-24.3"
   DIR_WEBUI: "sd-webui-forge"
@@ -14,10 +17,9 @@ env:
 
 on:
   push:
-    tags:
-      - 'v*.*.*'  # Trigger on version tags
-  workflow_dispatch:
-    # Allows manual triggering of the workflow
+    tags: # Trigger on version tags
+      - 'v*.*.*'
+  workflow_dispatch: # Allows manual triggering of the workflow
     inputs:
       release_name:
         description: 'Release name for the release and archive file.'
@@ -82,13 +84,13 @@ jobs:
       - name: Create 7z Archive (tag)
         if: ${{ github.event_name == 'push' }}
         run: |
-          7z a -t7z -m0=lzma2 -mx7 -mmt4 -md=32m "./sd_forge_${{ github.ref_name }}.7z" ./*
+          7z a -t7z -m0=lzma2 -mx7 -mmt4 -md=64m -ms=on "./sd_forge_${{ github.ref_name }}.7z" ./*
       
       # ? For Flow Triggered
       - name: Create 7z Archive (manual)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
-          7z a -t7z -m0=lzma2 -mx7 -mmt4 -md=32m "./sd_forge_${{ github.event.inputs.release_name }}.7z" ./*
+          7z a -t7z -m0=lzma2 -mx7 -mmt4 -md=64m -ms=on "./sd_forge_${{ github.event.inputs.release_name }}.7z" ./*
 
       # ! 8. Create a release and attach the package
       # ? For Tag Pushes
