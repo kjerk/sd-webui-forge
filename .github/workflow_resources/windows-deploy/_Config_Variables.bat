@@ -1,6 +1,7 @@
 @echo off
 
 :config
+
 SET PY_ENV_NAME=sd-forge
 
 SET DIR_MINIFORGE=%CD%\Miniforge3-24.3
@@ -27,9 +28,9 @@ echo " | |  | |_| | |  ( ( | ( (/ /
 echo " |_|   \___/|_|   \_|| |\____) ( )
 echo "                 (_____|      
 
-echo ----------------------------------------------------
-echo        Running Forge WebUI Configuration
-echo ----------------------------------------------------
+echo -------------------------------------------------
+echo         Running Forge WebUI Configuration
+echo -------------------------------------------------
 
 echo.
 echo The following options are currently set:
