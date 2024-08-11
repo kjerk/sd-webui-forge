@@ -1,4 +1,110 @@
 name: Build Standalone SD-Forge | Win-x64
 
-on: 
-   push:
+env:
+  DIR_MINIFORGE: "Miniforge3-24.3"
+  DIR_WEBUI: "sd-webui-forge"
+  
+  MINIFORGE_ENV_NAME: "sd-forge"
+  MINIFORGE_ENV_PYTHON: "3.11.09"
+
+  PYTORCH_INSTALL: "torch==2.2.2 torchvision torchaudio xformers --index-url https://download.pytorch.org/whl/cu121"
+
+  URL_FLASH_ATT: "https://github.com/oobabooga/flash-attention/releases/download/v2.6.1/flash_attn-2.6.1+cu122torch2.2.2cxx11abiFALSE-cp311-cp311-win_amd64.whl"
+  URL_MINIFORGE: "https://github.com/conda-forge/miniforge/releases/download/24.3.0-0/Miniforge3-24.3.0-0-Windows-x86_64.exe"
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on version tags
+  workflow_dispatch:
+    # Allows manual triggering of the workflow
+    inputs:
+      release_name:
+        description: 'Release name for the release and archive file.'
+        required: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    
+    steps:
+      # ! 1. Clone/checkout the repo to a subdirectory
+      - name: Clone/Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          path: "${{ env.DIR_WEBUI }}"
+
+      # ! 2. Download and Install Miniforge3 portable
+      - name: Install Miniforge3
+        run: |
+          Invoke-WebRequest -Uri "${{ env.URL_MINIFORGE }}" -OutFile "Miniforge3.exe"
+          Start-Process -Wait -FilePath "Miniforge3.exe" -ArgumentList "/InstallationType=JustMe", "/AddToPath=0", "/RegisterPython=0", "/NoRegistry=1", "/NoScripts=1", "/NoShortcuts=1", "/S", "/D=$PWD\${{ env.DIR_MINIFORGE }}"
+          Remove-Item "Miniforge3.exe"
+      
+      # ! 3. Init and set up Miniforge environment
+      - name: Miniforge Environment Setup
+        run: |
+          .\${{ env.DIR_MINIFORGE }}\condabin\mamba.bat create -n ${{ env.MINIFORGE_ENV_NAME }} python==${{ env.MINIFORGE_ENV_PYTHON }} -y
+          .\${{ env.DIR_MINIFORGE }}\shell\condabin\conda-hook.ps1
+          conda activate ${{ env.MINIFORGE_ENV_NAME }}
+          pip install ${{ env.PYTORCH_INSTALL }}
+          pip install ${{ env.URL_FLASH_ATT }}
+          pip install -r ${{ env.DIR_WEBUI }}/requirements_versions.txt
+          pip install git+https://github.com/openai/CLIP.git
+          pip install open_clip_torch
+          conda clean --all -y
+          pip cache purge
+          pip show xformers
+          pip show torch
+          python -m xformers.info
+
+      # ! 4. Init sub repositories
+      - name: Initialize Repo Subrepositories
+        run: |
+          mkdir ${{ env.DIR_WEBUI }}\repositories
+          cd ${{ env.DIR_WEBUI }}\repositories
+          git clone https://github.com/AUTOMATIC1111/stable-diffusion-webui-assets.git
+          git clone https://github.com/lllyasviel/huggingface_guess.git
+
+          git clone https://github.com/salesforce/BLIP.git
+          cd BLIP
+          git checkout 48211a1594f1321b00f14c9f7a5b4813144b2fb9 
+
+      # ! 5. Add launcher scripts (copy files from .github/workflow_resources/windows-deploy to root)
+      - name: Add launcher scripts
+        run: |
+          cp ${{ env.DIR_WEBUI }}/.github/workflow_resources/windows-deploy/*.bat "${{ github.workspace }}"
+      
+      # ! 6. Package everything
+      # ? For Tag Pushes
+      - name: Create 7z Archive (tag)
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          7z a -t7z -m0=lzma2 -mx7 -mmt4 -md=32m "./sd_forge_${{ github.ref_name }}.7z" ./*
+      
+      # ? For Flow Triggered
+      - name: Create 7z Archive (manual)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          7z a -t7z -m0=lzma2 -mx7 -mmt4 -md=32m "./sd_forge_${{ github.event.inputs.release_name }}.7z" ./*
+
+      # ! 8. Create a release and attach the package
+      # ? For Tag Pushes
+      - name: Create Release and Upload (tag)
+        if: ${{ github.event_name == 'push' }}
+        uses: ncipollo/release-action@v1
+        with:
+          name: Forge Release ${{ github.ref_name }}
+          artifacts: "sd_forge_${{ github.ref_name }}.7z"
+          tag: ${{ github.ref_name }}
+      
+      # ? For Flow Triggered
+      - name: Create Release and Upload (manual)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: ncipollo/release-action@v1
+        with:
+          name: Forge Release ${{ github.event.inputs.release_name }}
+          artifacts: "sd_forge_${{ github.event.inputs.release_name }}.7z"
+          tag: ${{ github.ref_name }}
