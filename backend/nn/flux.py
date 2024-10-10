@@ -9,6 +9,7 @@ import torch
 from torch import nn
 from einops import rearrange, repeat
 from backend.attention import attention_function
+from backend.utils import fp16_fix, tensor2parameter
 
 
 def attention(q, k, v, pe):
@@ -18,7 +19,10 @@ def attention(q, k, v, pe):
 
 
 def rope(pos, dim, theta):
-    scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
+    if pos.device.type == "mps" or pos.device.type == "xpu":
+        scale = torch.arange(0, dim, 2, dtype=torch.float32, device=pos.device) / dim
+    else:
+        scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
     omega = 1.0 / (theta ** scale)
 
     # out = torch.einsum("...n,d->...nd", pos, omega)
@@ -97,16 +101,29 @@ class MLPEmbedder(nn.Module):
         return self.out_layer(x)
 
 
+if hasattr(torch, 'rms_norm'):
+    functional_rms_norm = torch.rms_norm
+else:
+    def functional_rms_norm(x, normalized_shape, weight, eps):
+        if x.dtype in [torch.bfloat16, torch.float32]:
+            n = torch.rsqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + eps) * weight
+        else:
+            n = torch.rsqrt(torch.mean(x.float() ** 2, dim=-1, keepdim=True) + eps).to(x.dtype) * weight
+        return x * n
+
+
 class RMSNorm(nn.Module):
     def __init__(self, dim):
         super().__init__()
+        self.weight = None  # to trigger module_profile
         self.scale = nn.Parameter(torch.ones(dim))
+        self.eps = 1e-6
+        self.normalized_shape = [dim]
 
     def forward(self, x):
-        to_args = dict(device=x.device, dtype=x.dtype)
-        x = x.float()
-        rrms = torch.rsqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-6)
-        return (x * rrms).to(**to_args) * self.scale.to(**to_args)
+        if self.scale.dtype != x.dtype:
+            self.scale = tensor2parameter(self.scale.to(dtype=x.dtype))
+        return functional_rms_norm(x, self.normalized_shape, self.scale, self.eps)
 
 
 class QKNorm(nn.Module):
@@ -228,7 +245,7 @@ class DoubleStreamBlock(nn.Module):
         del txt_v, img_v
 
         attn = attention(q, k, v, pe=pe)
-        del pe
+        del pe, q, k, v
         txt_attn, img_attn = attn[:, :txt.shape[1]], attn[:, txt.shape[1]:]
         del attn
 
@@ -241,6 +258,8 @@ class DoubleStreamBlock(nn.Module):
         del txt_attn, txt_mod1_gate
         txt = txt + txt_mod2_gate * self.txt_mlp((1 + txt_mod2_scale) * self.txt_norm2(txt) + txt_mod2_shift)
         del txt_mod2_gate, txt_mod2_scale, txt_mod2_shift
+
+        txt = fp16_fix(txt)
 
         return img, txt
 
@@ -279,7 +298,13 @@ class SingleStreamBlock(nn.Module):
         del q, k, v, pe
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), dim=2))
         del attn, mlp
-        return x + mod_gate * output
+
+        x = x + mod_gate * output
+        del mod_gate, output
+
+        x = fp16_fix(x)
+
+        return x
 
 
 class LastLayer(nn.Module):

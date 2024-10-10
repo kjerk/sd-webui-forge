@@ -292,11 +292,12 @@ class UiSettings:
         self.interface = settings_interface
 
     def add_quicksettings(self):
-        with gr.Row(elem_id="quicksettings", variant="compact"):
+        with gr.Row(elem_id="quicksettings", variant="compact") as quicksettings_row:
             main_entry.make_checkpoint_manager_ui()
             for _i, k, _item in sorted(self.quicksettings_list, key=lambda x: self.quicksettings_names.get(x[1], x[0])):
                 component = create_setting_component(k, is_quicksettings=True)
                 self.component_dict[k] = component
+        return quicksettings_row
 
     def add_functionality(self, demo):
         self.submit.click(
@@ -323,15 +324,18 @@ class UiSettings:
                     show_progress=False,
                 )
 
-        def button_set_checkpoint_change(value, dummy):
-            return value, opts.dumpjson()
+        def button_set_checkpoint_change(model, vae, dummy):
+            if 'Built in' in vae:
+                vae.remove('Built in')
+            model = sd_models.match_checkpoint_to_name(model)
+            return model, vae, opts.dumpjson()
 
         button_set_checkpoint = gr.Button('Change checkpoint', elem_id='change_checkpoint', visible=False)
         button_set_checkpoint.click(
             fn=button_set_checkpoint_change,
-            js="function(v){ var res = desiredCheckpointName; desiredCheckpointName = ''; return [res || v, null]; }",
-            inputs=[main_entry.ui_checkpoint, self.dummy_component],
-            outputs=[main_entry.ui_checkpoint, self.text_settings],
+            js="function(c, v, n){ var ckpt = desiredCheckpointName; var vae = desiredVAEName; if (ckpt == null) ckpt = c; if (vae == 0) vae = v; desiredCheckpointName = null; desiredVAEName = 0; return [ckpt, vae, null]; }",
+            inputs=[main_entry.ui_checkpoint, main_entry.ui_vae, self.dummy_component],
+            outputs=[main_entry.ui_checkpoint, main_entry.ui_vae, self.text_settings],
         )
 
         component_keys = [k for k in opts.data_labels.keys() if k in self.component_dict]

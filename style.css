@@ -440,7 +440,28 @@ div.toprow-compact-tools{
 }
 
 #quicksettings > div.model_selection{
-    min-width: 24em !important;
+    min-width: 20em !important;
+}
+
+#quicksettings > div.model_selection input{
+    margin-left: 2% !important; /* override the margin set for subdued */
+    width: 100%;
+}
+
+#quicksettings .icon-wrap {
+    margin-right: -4% !important;
+    background-color: var(--background-fill-secondary);
+}
+
+#quicksettings > div.model_selection li{
+    overflow-x: visible !important;
+    width: 100% !important; /* Set size to max element */
+}
+
+#quicksettings .subdued{
+    display: block;
+    margin-left: auto;
+    width: 30px;
 }
 
 #settings{
@@ -753,6 +774,7 @@ table.popup-table .link{
     top: 0px;
     left: 0px;
     border: 2px solid red;
+    margin: -2px;
     background: rgba(255, 0, 0, 0.3);
     z-index: 900;
     pointer-events: none;
@@ -1666,4 +1688,18 @@ body.resizing .resize-handle {
 
 #quicksettings .gradio-slider span {
     padding-right: 5px;
+}
+
+.forge_space_label{
+    padding: 10px;
+    min-width: 60% !important;
+    margin: 1px;
+    border-width: 1px;
+    border-radius: 8px;
+    border-style: solid;
+    border-color: #6f6f6f;
+}
+
+.forge_space_btn{
+    min-width: 0 !important;
 }

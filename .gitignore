@@ -1,11 +1,17 @@
+huggingface_space_mirror/
 random_test.py
 __pycache__
 *.ckpt
 *.safetensors
 *.pth
 *.dev.js
+*_s.py
+*_u.py
+*_m.py
+*_i.py
 .DS_Store
 /output/
+/outputs/
 /ESRGAN/*
 /SwinIR/*
 /repositories

@@ -212,6 +212,12 @@ class StableDiffusionProcessing:
     latents_after_sampling = []
     pixels_after_sampling = []
 
+    def clear_prompt_cache(self):
+        self.cached_c = [None, None, None]
+        self.cached_uc = [None, None, None]
+        StableDiffusionProcessing.cached_c = [None, None, None]
+        StableDiffusionProcessing.cached_uc = [None, None, None]
+
     def __post_init__(self):
         if self.sampler_index is not None:
             print("sampler_index argument for StableDiffusionProcessing does not do anything; use sampler_name", file=sys.stderr)
@@ -413,6 +419,8 @@ class StableDiffusionProcessing:
 
         return (
             required_prompts,
+            self.distilled_cfg_scale,
+            self.hr_distilled_cfg,
             steps,
             hires_steps,
             use_old_scheduling,
@@ -458,7 +466,7 @@ class StableDiffusionProcessing:
         cache = caches[0]
 
         with devices.autocast():
-            shared.sd_model.set_clip_skip(opts.CLIP_stop_at_last_layers)
+            shared.sd_model.set_clip_skip(int(opts.CLIP_stop_at_last_layers))
 
             cache[1] = function(shared.sd_model, required_prompts, steps, hires_steps, shared.opts.use_old_scheduling)
 
@@ -535,7 +543,7 @@ class Processed:
         self.index_of_first_image = index_of_first_image
         self.styles = p.styles
         self.job_timestamp = state.job_timestamp
-        self.clip_skip = opts.CLIP_stop_at_last_layers
+        self.clip_skip = int(opts.CLIP_stop_at_last_layers)
         self.token_merging_ratio = p.token_merging_ratio
         self.token_merging_ratio_hr = p.token_merging_ratio_hr
 
@@ -707,7 +715,7 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
     if all_negative_prompts is None:
         all_negative_prompts = p.all_negative_prompts
 
-    clip_skip = getattr(p, 'clip_skip', opts.CLIP_stop_at_last_layers)
+    clip_skip = int(getattr(p, 'clip_skip', opts.CLIP_stop_at_last_layers))
     enable_hr = getattr(p, 'enable_hr', False)
     token_merging_ratio = p.get_token_merging_ratio()
     token_merging_ratio_hr = p.get_token_merging_ratio(for_hr=True)
@@ -740,8 +748,8 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
         "Model": p.sd_model_name if opts.add_model_name_to_info else None,
         "FP8 weight": opts.fp8_storage if devices.fp8 else None,
         "Cache FP16 weight for LoRA": opts.cache_fp16_weight if devices.fp8 else None,
-        "VAE hash": p.sd_vae_hash if opts.add_vae_hash_to_info else None,
-        "VAE": p.sd_vae_name if opts.add_vae_name_to_info else None,
+        # "VAE hash": p.sd_vae_hash if opts.add_vae_hash_to_info else None,
+        # "VAE": p.sd_vae_name if opts.add_vae_name_to_info else None,
         "Variation seed": (None if p.subseed_strength == 0 else (p.all_subseeds[0] if use_main_prompt else all_subseeds[index])),
         "Variation seed strength": (None if p.subseed_strength == 0 else p.subseed_strength),
         "Seed resize from": (None if p.seed_resize_from_w <= 0 or p.seed_resize_from_h <= 0 else f"{p.seed_resize_from_w}x{p.seed_resize_from_h}"),
@@ -758,6 +766,13 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
         "Version": program_version() if opts.add_version_to_infotext else None,
         "User": p.user if opts.add_user_name_to_info else None,
     })
+
+    if shared.opts.forge_unet_storage_dtype != 'Automatic':
+        generation_params['Diffusion in Low Bits'] = shared.opts.forge_unet_storage_dtype
+
+    if isinstance(shared.opts.forge_additional_modules, list) and len(shared.opts.forge_additional_modules) > 0:
+        for i, m in enumerate(shared.opts.forge_additional_modules):
+            generation_params[f'Module {i+1}'] = os.path.splitext(os.path.basename(m))[0]
 
     for key, value in generation_params.items():
         try:
@@ -786,6 +801,9 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
 
     if need_global_unload and not just_reloaded:
         memory_management.unload_all_models()
+
+    if need_global_unload:
+        p.clear_prompt_cache()
 
     need_global_unload = False
 
@@ -1139,6 +1157,8 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
     hr_scheduler: str = None
     hr_prompt: str = ''
     hr_negative_prompt: str = ''
+    hr_cfg: float = 1.0
+    hr_distilled_cfg: float = 3.5
     force_task_id: str = None
 
     cached_hr_uc = [None, None, None]
@@ -1235,6 +1255,10 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
             self.extra_generation_params["Hires prompt"] = get_hr_prompt
             self.extra_generation_params["Hires negative prompt"] = get_hr_negative_prompt
+
+            self.extra_generation_params["Hires CFG Scale"] = self.hr_cfg
+            if shared.sd_model.use_distilled_cfg_scale:
+                self.extra_generation_params['Hires Distilled CFG Scale'] = self.hr_distilled_cfg
 
             self.extra_generation_params["Hires schedule type"] = None  # to be set in sd_samplers_kdiffusion.py
 
@@ -1477,14 +1501,19 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         if self.hr_c is not None:
             return
 
-        hr_prompts = prompt_parser.SdConditioning(self.hr_prompts, width=self.hr_upscale_to_x, height=self.hr_upscale_to_y)
-        hr_negative_prompts = prompt_parser.SdConditioning(self.hr_negative_prompts, width=self.hr_upscale_to_x, height=self.hr_upscale_to_y, is_negative_prompt=True)
+        hr_prompts = prompt_parser.SdConditioning(self.hr_prompts, width=self.hr_upscale_to_x, height=self.hr_upscale_to_y, distilled_cfg_scale=self.hr_distilled_cfg)
+        hr_negative_prompts = prompt_parser.SdConditioning(self.hr_negative_prompts, width=self.hr_upscale_to_x, height=self.hr_upscale_to_y, is_negative_prompt=True, distilled_cfg_scale=self.hr_distilled_cfg)
 
         sampler_config = sd_samplers.find_sampler_config(self.hr_sampler_name or self.sampler_name)
         steps = self.hr_second_pass_steps or self.steps
         total_steps = sampler_config.total_steps(steps) if sampler_config else steps
 
-        self.hr_uc = self.get_conds_with_caching(prompt_parser.get_learned_conditioning, hr_negative_prompts, self.firstpass_steps, [self.cached_hr_uc, self.cached_uc], self.hr_extra_network_data, total_steps)
+        if self.cfg_scale == 1:
+            self.hr_uc = None
+            print('Skipping unconditional conditioning (HR pass) when CFG = 1. Negative Prompts are ignored.')
+        else:
+            self.hr_uc = self.get_conds_with_caching(prompt_parser.get_learned_conditioning, hr_negative_prompts, self.firstpass_steps, [self.cached_hr_uc, self.cached_uc], self.hr_extra_network_data, total_steps)
+
         self.hr_c = self.get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, hr_prompts, self.firstpass_steps, [self.cached_hr_c, self.cached_c], self.hr_extra_network_data, total_steps)
 
     def setup_conds(self):
@@ -1547,6 +1576,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
     initial_noise_multiplier: float = None
     latent_mask: Image = None
     force_task_id: str = None
+
+    hr_distilled_cfg: float = 3.5       #   needed here for cached_params
 
     image_mask: Any = field(default=None, init=False)
 

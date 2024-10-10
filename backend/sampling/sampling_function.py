@@ -10,6 +10,8 @@ import collections
 from backend import memory_management
 from backend.sampling.condition import Condition, compile_conditions, compile_weighted_conditions
 from backend.operations import cleanup_cache
+from backend.args import dynamic_args, args
+from backend import utils
 
 
 def get_area_and_mult(conds, x_in, timestep_in):
@@ -185,7 +187,24 @@ def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options):
         to_batch_temp.reverse()
         to_batch = to_batch_temp[:1]
 
+        if memory_management.signal_empty_cache:
+            memory_management.soft_empty_cache()
+
         free_memory = memory_management.get_free_memory(x_in.device)
+
+        if (not args.disable_gpu_warning) and x_in.device.type == 'cuda':
+            free_memory_mb = free_memory / (1024.0 * 1024.0)
+            safe_memory_mb = 1536.0
+            if free_memory_mb < safe_memory_mb:
+                print(f"\n\n----------------------")
+                print(f"[Low GPU VRAM Warning] Your current GPU free memory is {free_memory_mb:.2f} MB for this diffusion iteration.")
+                print(f"[Low GPU VRAM Warning] This number is lower than the safe value of {safe_memory_mb:.2f} MB.")
+                print(f"[Low GPU VRAM Warning] If you continue, you may cause NVIDIA GPU performance degradation for this diffusion process, and the speed may be extremely slow (about 10x slower).")
+                print(f"[Low GPU VRAM Warning] To solve the problem, you can set the 'GPU Weights' (on the top of page) to a lower value.")
+                print(f"[Low GPU VRAM Warning] If you cannot find 'GPU Weights', you can click the 'all' option in the 'UI' area on the left-top corner of the webpage.")
+                print(f"[Low GPU VRAM Warning] If you want to take the risk of NVIDIA GPU fallback and test the 10x slower speed, you can (but are highly not recommended to) add '--disable-gpu-warning' to CMD flags to remove this warning.")
+                print(f"----------------------\n\n")
+
         for i in range(1, len(to_batch_temp) + 1):
             batch_amount = to_batch_temp[:len(to_batch_temp) // i]
             input_shape = [len(batch_amount) * first_shape[0]] + list(first_shape)[1:]
@@ -324,14 +343,18 @@ def sampling_function(self, denoiser_params, cond_scale, cond_composition):
         if image_cond_in.shape[0] == x.shape[0] \
                 and image_cond_in.shape[2] == x.shape[2] \
                 and image_cond_in.shape[3] == x.shape[3]:
-            for i in range(len(uncond)):
-                uncond[i]['model_conds']['c_concat'] = Condition(image_cond_in)
+            if uncond is not None:
+                for i in range(len(uncond)):
+                    uncond[i]['model_conds']['c_concat'] = Condition(image_cond_in)
             for i in range(len(cond)):
                 cond[i]['model_conds']['c_concat'] = Condition(image_cond_in)
 
     if control is not None:
-        for h in cond + uncond:
+        for h in cond:
             h['control'] = control
+        if uncond is not None:
+            for h in uncond:
+                h['control'] = control
 
     for modifier in model_options.get('conditioning_modifiers', []):
         model, x, timestep, uncond, cond, cond_scale, model_options, seed = modifier(model, x, timestep, uncond, cond, cond_scale, model_options, seed)
@@ -353,9 +376,18 @@ def sampling_prepare(unet, x):
         additional_inference_memory += unet.controlnet_linked_list.inference_memory_requirements(unet.model_dtype())
         additional_model_patchers += unet.controlnet_linked_list.get_models()
 
+    if unet.has_online_lora():
+        lora_memory = utils.nested_compute_size(unet.lora_patches, element_size=utils.dtype_to_element_size(unet.model.computation_dtype))
+        additional_inference_memory += lora_memory
+
     memory_management.load_models_gpu(
         models=[unet] + additional_model_patchers,
-        memory_required=unet_inference_memory + additional_inference_memory)
+        memory_required=unet_inference_memory,
+        hard_memory_preservation=additional_inference_memory
+    )
+
+    if unet.has_online_lora():
+        utils.nested_move_to_device(unet.lora_patches, device=unet.current_device, dtype=unet.model.computation_dtype)
 
     real_model = unet.model
 
@@ -368,6 +400,8 @@ def sampling_prepare(unet, x):
 
 
 def sampling_cleanup(unet):
+    if unet.has_online_lora():
+        utils.nested_move_to_device(unet.lora_patches, device=unet.offload_device)
     for cnet in unet.list_controlnets():
         cnet.cleanup()
     cleanup_cache()
