@@ -8,10 +8,11 @@ SET DIR_MINIFORGE=%CD%\Miniforge3-24.3
 SET DIR_WEBUIFORGE=%CD%\sd-webui-forge
 
 SET FORGE_FLAGS=--skip-version-check ^
-  --skip_prepare_environment ^
+  --skip-prepare-environment ^
   --skip-torch-cuda-test ^
   --skip-python-version-check ^
   --skip-load-model-at-start ^
+  --skip-install ^
   --disable-xformers ^
   --no-download-sd-model
 
