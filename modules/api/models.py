@@ -262,9 +262,9 @@ class SDModelItem(BaseModel):
     hash: Optional[str] = Field(title="Short hash")
     sha256: Optional[str] = Field(title="sha256 hash")
     filename: str = Field(title="Filename")
-    config: Optional[str] = Field(title="Config file")
+    config: Optional[str] = Field(default=None, title="Config file")
 
-class SDVaeItem(BaseModel):
+class SDModuleItem(BaseModel):
     class Config:
         protected_namespaces = ()
 
@@ -332,5 +332,5 @@ class ExtensionItem(BaseModel):
     branch: str = Field(title="Branch", description="Extension Repository Branch")
     commit_hash: str = Field(title="Commit Hash", description="Extension Repository Commit Hash")
     version: str = Field(title="Version", description="Extension Version")
-    commit_date: str = Field(title="Commit Date", description="Extension Repository Commit Date")
+    commit_date: int = Field(title="Commit Date", description="Extension Repository Commit Date")
     enabled: bool = Field(title="Enabled", description="Flag specifying whether this extension is enabled")

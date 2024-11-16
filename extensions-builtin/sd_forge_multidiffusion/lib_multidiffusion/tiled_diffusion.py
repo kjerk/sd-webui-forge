@@ -433,10 +433,6 @@ class MultiDiffusion(AbstractDiffusion):
         # Background sampling (grid bbox)
         if self.draw_background:
             for batch_id, bboxes in enumerate(self.batched_bboxes):
-                if memory_management.processing_interrupted():
-                    # self.pbar.close()
-                    return x_in
-
                 # batching & compute tiles
                 x_tile = torch.cat([x_in[bbox.slicer] for bbox in bboxes], dim=0)  # [TB, C, TH, TW]
                 n_rep = len(bboxes)
@@ -536,10 +532,6 @@ class MixtureOfDiffusers(AbstractDiffusion):
         # Global sampling
         if self.draw_background:
             for batch_id, bboxes in enumerate(self.batched_bboxes):  # batch_id is the `Latent tile batch size`
-                if memory_management.processing_interrupted():
-                    # self.pbar.close()
-                    return x_in
-
                 # batching
                 x_tile_list = []
                 t_tile_list = []
@@ -586,9 +578,8 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 # controlnet
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes), is_denoise=True)
                 if 'control' in c_in:
-                    control = c_in['control']
                     self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
-                    c_tile['control'] = control.get_control(x_tile, t_tile, c_tile, len(cond_or_uncond))
+                    c_tile['control'] = c_in['control_model'].get_control(x_tile, t_tile, c_tile, len(cond_or_uncond))
 
                 # stablesr
                 # self.switch_stablesr_tensors(batch_id)

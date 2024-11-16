@@ -26,7 +26,8 @@ import modules.shared as shared
 from modules import prompt_parser
 from modules.infotext_utils import image_from_url_text, PasteField
 from modules_forge.forge_canvas.canvas import ForgeCanvas, canvas_head
-from modules_forge import main_entry
+from modules_forge import main_entry, forge_space
+import modules.processing_scripts.comments as comments
 
 
 create_setting_component = ui_settings.create_setting_component
@@ -96,7 +97,13 @@ def calc_resolution_hires(enable, width, height, hr_scale, hr_resize_x, hr_resiz
     p = processing.StableDiffusionProcessingTxt2Img(width=width, height=height, enable_hr=True, hr_scale=hr_scale, hr_resize_x=hr_resize_x, hr_resize_y=hr_resize_y)
     p.calculate_target_resolution()
 
-    return f"from <span class='resolution'>{p.width}x{p.height}</span> to <span class='resolution'>{p.hr_resize_x or p.hr_upscale_to_x}x{p.hr_resize_y or p.hr_upscale_to_y}</span>"
+    new_width = p.hr_resize_x or p.hr_upscale_to_x
+    new_height = p.hr_resize_y or p.hr_upscale_to_y
+    
+    new_width -= new_width % 8        #   note: hardcoded latent size 8
+    new_height -= new_height % 8
+
+    return f"from <span class='resolution'>{p.width}x{p.height}</span> to <span class='resolution'>{new_width}x{new_height}</span>"
 
 
 def resize_from_to_html(width, height, scale_by):
@@ -105,6 +112,9 @@ def resize_from_to_html(width, height, scale_by):
 
     if not target_width or not target_height:
         return "no image selected"
+
+    target_width -= target_width % 8        #   note: hardcoded latent size 8
+    target_height -= target_height % 8
 
     return f"resize: from <span class='resolution'>{width}x{height}</span> to <span class='resolution'>{target_width}x{target_height}</span>"
 
@@ -164,6 +174,8 @@ def update_token_counter(text, steps, styles, *, is_positive=True):
     if shared.opts.include_styles_into_token_counters:
         apply_styles = shared.prompt_styles.apply_styles_to_prompt if is_positive else shared.prompt_styles.apply_negative_styles_to_prompt
         text = apply_styles(text, styles)
+    else:
+        text = comments.strip_comments(text).strip()
 
     try:
         text, _ = extra_networks.parse_prompt(text)
@@ -307,9 +319,8 @@ def create_ui():
 
                     elif category == "cfg":
                         with gr.Row():
-                            distilled_cfg_scale = gr.Slider(minimum=0.0, maximum=30.0, step=0.5, label='Distilled CFG Scale', value=3.5, elem_id="txt2img_distilled_cfg_scale")
-                        with gr.Row():
-                            cfg_scale = gr.Slider(minimum=1.0, maximum=30.0, step=0.5, label='CFG Scale', value=7.0, elem_id="txt2img_cfg_scale")
+                            distilled_cfg_scale = gr.Slider(minimum=0.0, maximum=30.0, step=0.1, label='Distilled CFG Scale', value=3.5, elem_id="txt2img_distilled_cfg_scale")
+                            cfg_scale = gr.Slider(minimum=1.0, maximum=30.0, step=0.1, label='CFG Scale', value=7.0, elem_id="txt2img_cfg_scale")
                             cfg_scale.change(lambda x: gr.update(interactive=(x != 1)), inputs=[cfg_scale], outputs=[toprow.negative_prompt], queue=False, show_progress=False)
 
                     elif category == "checkboxes":
@@ -332,21 +343,45 @@ def create_ui():
                                     hr_resize_x = gr.Slider(minimum=0, maximum=2048, step=8, label="Resize width to", value=0, elem_id="txt2img_hr_resize_x")
                                     hr_resize_y = gr.Slider(minimum=0, maximum=2048, step=8, label="Resize height to", value=0, elem_id="txt2img_hr_resize_y")
 
-                                with FormRow(elem_id="txt2img_hires_fix_row3", variant="compact") as hr_sampler_container:
+                                with FormRow(elem_id="txt2img_hires_fix_row_cfg", variant="compact"):
+                                    hr_distilled_cfg = gr.Slider(minimum=0.0, maximum=30.0, step=0.1, label="Hires Distilled CFG Scale", value=3.5, elem_id="txt2img_hr_distilled_cfg")
+                                    hr_cfg = gr.Slider(minimum=1.0, maximum=30.0, step=0.1, label="Hires CFG Scale", value=7.0, elem_id="txt2img_hr_cfg")
+   
+                                with FormRow(elem_id="txt2img_hires_fix_row3", variant="compact", visible=shared.opts.hires_fix_show_sampler) as hr_checkpoint_container:
+                                    hr_checkpoint_name = gr.Dropdown(label='Hires Checkpoint', elem_id="hr_checkpoint", choices=["Use same checkpoint"] + modules.sd_models.checkpoint_tiles(use_short=True), value="Use same checkpoint", scale=2)
 
-                                    hr_checkpoint_name = gr.Dropdown(label='Checkpoint', elem_id="hr_checkpoint", choices=["Use same checkpoint"], value="Use same checkpoint", visible=False, interactive=False)
-                                    # create_refresh_button(hr_checkpoint_name, modules.sd_models.list_models, lambda: {"choices": ["Use same checkpoint"] + modules.sd_models.checkpoint_tiles(use_short=True)}, "hr_checkpoint_refresh")
+                                    hr_checkpoint_refresh = ToolButton(value=refresh_symbol)
 
+                                    def get_additional_modules():
+                                        modules_list = ['Use same choices']
+                                        if main_entry.module_list == {}:
+                                            _, modules = main_entry.refresh_models()
+                                            modules_list += list(modules)
+                                        else:
+                                            modules_list += list(main_entry.module_list.keys())
+                                        return modules_list
+                                        
+                                    modules_list = get_additional_modules()
+
+                                    def refresh_model_and_modules():
+                                        modules_list = get_additional_modules()
+                                        return gr.update(choices=["Use same checkpoint"] + modules.sd_models.checkpoint_tiles(use_short=True)), gr.update(choices=modules_list)
+
+                                    hr_additional_modules = gr.Dropdown(label='Hires VAE / Text Encoder', elem_id="hr_vae_te", choices=modules_list, value=["Use same choices"], multiselect=True, scale=3)
+
+                                    hr_checkpoint_refresh.click(fn=refresh_model_and_modules, outputs=[hr_checkpoint_name, hr_additional_modules], show_progress=False)
+
+                                with FormRow(elem_id="txt2img_hires_fix_row3b", variant="compact", visible=shared.opts.hires_fix_show_sampler) as hr_sampler_container:
                                     hr_sampler_name = gr.Dropdown(label='Hires sampling method', elem_id="hr_sampler", choices=["Use same sampler"] + sd_samplers.visible_sampler_names(), value="Use same sampler")
                                     hr_scheduler = gr.Dropdown(label='Hires schedule type', elem_id="hr_scheduler", choices=["Use same scheduler"] + [x.label for x in sd_schedulers.schedulers], value="Use same scheduler")
 
-                                with FormRow(elem_id="txt2img_hires_fix_row4", variant="compact") as hr_prompts_container:
-                                    with gr.Column(scale=80):
-                                        with gr.Row():
-                                            hr_prompt = gr.Textbox(label="Hires prompt", elem_id="hires_prompt", show_label=False, lines=3, placeholder="Prompt for hires fix pass.\nLeave empty to use the same prompt as in first pass.", elem_classes=["prompt"])
-                                    with gr.Column(scale=80):
-                                        with gr.Row():
-                                            hr_negative_prompt = gr.Textbox(label="Hires negative prompt", elem_id="hires_neg_prompt", show_label=False, lines=3, placeholder="Negative prompt for hires fix pass.\nLeave empty to use the same negative prompt as in first pass.", elem_classes=["prompt"])
+                                with FormRow(elem_id="txt2img_hires_fix_row4", variant="compact", visible=shared.opts.hires_fix_show_prompts) as hr_prompts_container:
+                                    with gr.Column():
+                                        hr_prompt = gr.Textbox(label="Hires prompt", elem_id="hires_prompt", show_label=False, lines=3, placeholder="Prompt for hires fix pass.\nLeave empty to use the same prompt as in first pass.", elem_classes=["prompt"])
+                                    with gr.Column():
+                                        hr_negative_prompt = gr.Textbox(label="Hires negative prompt", elem_id="hires_neg_prompt", show_label=False, lines=3, placeholder="Negative prompt for hires fix pass.\nLeave empty to use the same negative prompt as in first pass.", elem_classes=["prompt"])
+
+                                hr_cfg.change(lambda x: gr.update(interactive=(x != 1)), inputs=[hr_cfg], outputs=[hr_negative_prompt], queue=False, show_progress=False)
 
                             scripts.scripts_txt2img.setup_ui_for_section(category)
 
@@ -407,10 +442,13 @@ def create_ui():
                 hr_resize_x,
                 hr_resize_y,
                 hr_checkpoint_name,
+                hr_additional_modules,
                 hr_sampler_name,
                 hr_scheduler,
                 hr_prompt,
                 hr_negative_prompt,
+                hr_cfg,
+                hr_distilled_cfg,
                 override_settings,
             ] + custom_inputs
 
@@ -423,7 +461,7 @@ def create_ui():
 
             txt2img_args = dict(
                 fn=wrap_gradio_gpu_call(modules.txt2img.txt2img, extra_outputs=[None, '', '']),
-                js=f"(...args) => {{ return submit(args.slice(0, {len(txt2img_inputs)})); }}",
+                _js="submit",
                 inputs=txt2img_inputs,
                 outputs=txt2img_outputs,
                 show_progress=False,
@@ -435,13 +473,13 @@ def create_ui():
             txt2img_upscale_inputs = txt2img_inputs[0:1] + [output_panel.gallery, dummy_component_number, output_panel.generation_info] + txt2img_inputs[1:]
             output_panel.button_upscale.click(
                 fn=wrap_gradio_gpu_call(modules.txt2img.txt2img_upscale, extra_outputs=[None, '', '']),
-                js=f"(...args) => {{ return submit_txt2img_upscale(args.slice(0, {len(txt2img_upscale_inputs)})); }}",
+                _js="submit_txt2img_upscale",
                 inputs=txt2img_upscale_inputs,
                 outputs=txt2img_outputs,
                 show_progress=False,
             )
 
-            res_switch_btn.click(fn=None, _js="function(){switchWidthHeight('txt2img')}", inputs=None, outputs=None, show_progress=False)
+            res_switch_btn.click(lambda w, h: (h, w), inputs=[width, height], outputs=[width, height], show_progress=False)
 
             toprow.restore_progress_button.click(
                 fn=progress.restore_progress,
@@ -473,11 +511,14 @@ def create_ui():
                 PasteField(hr_resize_x, "Hires resize-1", api="hr_resize_x"),
                 PasteField(hr_resize_y, "Hires resize-2", api="hr_resize_y"),
                 PasteField(hr_checkpoint_name, "Hires checkpoint", api="hr_checkpoint_name"),
+                PasteField(hr_additional_modules, "Hires VAE/TE", api="hr_additional_modules"),
                 PasteField(hr_sampler_name, sd_samplers.get_hr_sampler_from_infotext, api="hr_sampler_name"),
                 PasteField(hr_scheduler, sd_samplers.get_hr_scheduler_from_infotext, api="hr_scheduler"),
                 PasteField(hr_sampler_container, lambda d: gr.update(visible=True) if d.get("Hires sampler", "Use same sampler") != "Use same sampler" or d.get("Hires checkpoint", "Use same checkpoint") != "Use same checkpoint" or d.get("Hires schedule type", "Use same scheduler") != "Use same scheduler" else gr.update()),
                 PasteField(hr_prompt, "Hires prompt", api="hr_prompt"),
                 PasteField(hr_negative_prompt, "Hires negative prompt", api="hr_negative_prompt"),
+                PasteField(hr_cfg, "Hires CFG Scale", api="hr_cfg"),
+                PasteField(hr_distilled_cfg, "Hires Distilled CFG Scale", api="hr_distilled_cfg"),
                 PasteField(hr_prompts_container, lambda d: gr.update(visible=True) if d.get("Hires prompt", "") != "" or d.get("Hires negative prompt", "") != "" else gr.update()),
                 *scripts.scripts_txt2img.infotext_fields
             ]
@@ -542,15 +583,15 @@ def create_ui():
                                 add_copy_image_controls('img2img', init_img)
 
                             with gr.TabItem('Sketch', id='img2img_sketch', elem_id="img2img_img2img_sketch_tab") as tab_sketch:
-                                sketch = ForgeCanvas(elem_id="img2img_sketch", height=512)
+                                sketch = ForgeCanvas(elem_id="img2img_sketch", height=512, scribble_color=opts.img2img_sketch_default_brush_color)
                                 add_copy_image_controls('sketch', sketch)
 
                             with gr.TabItem('Inpaint', id='inpaint', elem_id="img2img_inpaint_tab") as tab_inpaint:
-                                init_img_with_mask = ForgeCanvas(elem_id="img2maskimg", height=512, contrast_scribbles=True)
+                                init_img_with_mask = ForgeCanvas(elem_id="img2maskimg", height=512, contrast_scribbles=opts.img2img_inpaint_mask_high_contrast, scribble_color=opts.img2img_inpaint_mask_brush_color, scribble_color_fixed=True, scribble_alpha_fixed=True, scribble_softness_fixed=True)
                                 add_copy_image_controls('inpaint', init_img_with_mask)
 
                             with gr.TabItem('Inpaint sketch', id='inpaint_sketch', elem_id="img2img_inpaint_sketch_tab") as tab_inpaint_color:
-                                inpaint_color_sketch = ForgeCanvas(elem_id="inpaint_sketch", height=512)
+                                inpaint_color_sketch = ForgeCanvas(elem_id="inpaint_sketch", height=512, scribble_color=opts.img2img_inpaint_sketch_default_brush_color)
                                 add_copy_image_controls('inpaint_sketch', inpaint_color_sketch)
 
                             with gr.TabItem('Inpaint upload', id='inpaint_upload', elem_id="img2img_inpaint_upload_tab") as tab_inpaint_upload:
@@ -585,11 +626,17 @@ def create_ui():
                             for i, tab in enumerate(img2img_tabs):
                                 tab.select(fn=lambda tabnum=i: tabnum, inputs=[], outputs=[img2img_selected_tab])
 
+                        def copyCanvas_img2img (background, foreground, source):
+                            if source == 1 or source == 3: #   1 is sketch, 3 is Inpaint sketch
+                                bg = Image.alpha_composite(background, foreground)
+                                return bg, None
+                            return background, None
+
                         for button, name, elem in copy_image_buttons:
                             button.click(
-                                fn=lambda img: img,
-                                inputs=[elem.background],
-                                outputs=[copy_image_destinations[name].background],
+                                fn=copyCanvas_img2img,
+                                inputs=[elem.background, elem.foreground, img2img_selected_tab],
+                                outputs=[copy_image_destinations[name].background, copy_image_destinations[name].foreground],
                             )
                             button.click(
                                 fn=None,
@@ -617,7 +664,7 @@ def create_ui():
                                                 detect_image_size_btn = ToolButton(value=detect_image_size_symbol, elem_id="img2img_detect_image_size_btn", tooltip="Auto detect size from img2img")
 
                                     with gr.Tab(label="Resize by", id="by", elem_id="img2img_tab_resize_by") as tab_scale_by:
-                                        scale_by = gr.Slider(minimum=0.05, maximum=4.0, step=0.05, label="Scale", value=1.0, elem_id="img2img_scale")
+                                        scale_by = gr.Slider(minimum=0.05, maximum=4.0, step=0.01, label="Scale", value=1.0, elem_id="img2img_scale")
 
                                         with FormRow():
                                             scale_by_html = FormHTML(resize_from_to_html(0, 0, 0.0), elem_id="img2img_scale_resolution_preview")
@@ -632,8 +679,19 @@ def create_ui():
                                         show_progress=False,
                                     )
 
-                                    scale_by.release(**on_change_args)
+                                    scale_by.change(**on_change_args)
                                     button_update_resize_to.click(**on_change_args)
+
+                                    def updateWH (img, w, h):
+                                        if img and shared.opts.img2img_autosize == True:
+                                            return img.size[0], img.size[1]
+                                        else:
+                                            return w, h
+
+                                    img_sources = [init_img.background, sketch.background, init_img_with_mask.background, inpaint_color_sketch.background, init_img_inpaint]
+                                    for i in img_sources:
+                                        i.change(fn=updateWH, inputs=[i, width, height], outputs=[width, height], show_progress='hidden')
+                                        i.change(**on_change_args)
 
                             tab_scale_to.select(fn=lambda: 0, inputs=[], outputs=[selected_scale_tab])
                             tab_scale_by.select(fn=lambda: 1, inputs=[], outputs=[selected_scale_tab])
@@ -648,9 +706,8 @@ def create_ui():
 
                     elif category == "cfg":
                         with gr.Row():
-                            distilled_cfg_scale = gr.Slider(minimum=0.0, maximum=30.0, step=0.5, label='Distilled CFG Scale', value=3.5, elem_id="img2img_distilled_cfg_scale")
-                        with gr.Row():
-                            cfg_scale = gr.Slider(minimum=1.0, maximum=30.0, step=0.5, label='CFG Scale', value=7.0, elem_id="img2img_cfg_scale")
+                            distilled_cfg_scale = gr.Slider(minimum=0.0, maximum=30.0, step=0.1, label='Distilled CFG Scale', value=3.5, elem_id="img2img_distilled_cfg_scale")
+                            cfg_scale = gr.Slider(minimum=1.0, maximum=30.0, step=0.1, label='CFG Scale', value=7.0, elem_id="img2img_cfg_scale")
                             image_cfg_scale = gr.Slider(minimum=0, maximum=3.0, step=0.05, label='Image CFG Scale', value=1.5, elem_id="img2img_image_cfg_scale", visible=False)
                             cfg_scale.change(lambda x: gr.update(interactive=(x != 1)), inputs=[cfg_scale], outputs=[toprow.negative_prompt], queue=False, show_progress=False)
 
@@ -755,7 +812,7 @@ def create_ui():
 
             img2img_args = dict(
                 fn=wrap_gradio_gpu_call(modules.img2img.img2img, extra_outputs=[None, '', '']),
-                js=f"(...args) => {{ return submit_img2img(args.slice(0, {len(submit_img2img_inputs)})); }}",
+                _js="submit_img2img",
                 inputs=submit_img2img_inputs,
                 outputs=[
                     output_panel.gallery,
@@ -784,7 +841,7 @@ def create_ui():
             toprow.prompt.submit(**img2img_args)
             toprow.submit.click(**img2img_args)
 
-            res_switch_btn.click(fn=None, _js="function(){switchWidthHeight('img2img')}", inputs=None, outputs=None, show_progress=False)
+            res_switch_btn.click(lambda w, h: (h, w), inputs=[width, height], outputs=[width, height], show_progress=False)
 
             detect_image_size_btn.click(
                 fn=lambda w, h: (w or gr.update(), h or gr.update()),
@@ -853,6 +910,9 @@ def create_ui():
 
         extra_tabs.__exit__()
 
+    with gr.Blocks(analytics_enabled=False, head=canvas_head) as space_interface:
+        forge_space.main_entry()
+
     scripts.scripts_current = None
 
     with gr.Blocks(analytics_enabled=False, head=canvas_head) as extras_interface:
@@ -891,6 +951,7 @@ def create_ui():
     interfaces = [
         (txt2img_interface, "Txt2img", "txt2img"),
         (img2img_interface, "Img2img", "img2img"),
+        (space_interface, "Spaces", "space"),
         (extras_interface, "Extras", "extras"),
         (pnginfo_interface, "PNG Info", "pnginfo"),
         (modelmerger_ui.blocks, "Checkpoint Merger", "modelmerger"),
@@ -902,12 +963,14 @@ def create_ui():
     extensions_interface = ui_extensions.create_ui()
     interfaces += [(extensions_interface, "Extensions", "extensions")]
 
+    interface_names_without_quick_setting_bars = ["Spaces"]
+
     shared.tab_names = []
     for _interface, label, _ifid in interfaces:
         shared.tab_names.append(label)
 
     with gr.Blocks(theme=shared.gradio_theme, analytics_enabled=False, title="Stable Diffusion", head=canvas_head) as demo:
-        settings.add_quicksettings()
+        quicksettings_row = settings.add_quicksettings()
 
         parameters_copypaste.connect_paste_params_buttons()
 
@@ -927,6 +990,11 @@ def create_ui():
             loadsave.add_component(f"webui/Tabs@{tabs.elem_id}", tabs)
 
             loadsave.setup_ui()
+
+        def tab_changed(evt: gr.SelectData):
+            return gr.update(visible=evt.value not in interface_names_without_quick_setting_bars)
+
+        tabs.select(tab_changed, outputs=[quicksettings_row], show_progress=False, queue=False)
 
         if os.path.exists(os.path.join(script_path, "notification.mp3")) and shared.opts.notification_audio:
             gr.Audio(interactive=False, value=os.path.join(script_path, "notification.mp3"), elem_id="audio_notification", visible=False)

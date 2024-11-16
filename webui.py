@@ -3,6 +3,10 @@ from __future__ import annotations
 import os
 import time
 
+from fastapi import Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+
 from modules import timer
 from modules import initialize_util
 from modules import initialize
@@ -10,8 +14,6 @@ from threading import Thread
 from modules_forge.initialization import initialize_forge
 from modules_forge import main_thread
 
-
-from modules_forge.forge_canvas.canvas import canvas_js_root_path
 
 startup_timer = timer.startup_timer
 startup_timer.record("launcher")
@@ -23,6 +25,17 @@ initialize.imports()
 initialize.check_versions()
 
 initialize.initialize()
+
+
+def _handle_exception(request: Request, e: Exception):
+    error_information = vars(e)
+    content = {
+        "error": type(e).__name__,
+        "detail": error_information.get("detail", ""),
+        "body": error_information.get("body", ""),
+        "message": str(e),
+    }
+    return JSONResponse(status_code=int(error_information.get("status_code", 500)), content=jsonable_encoder(content))
 
 
 def create_api(app):
@@ -37,7 +50,7 @@ def api_only_worker():
     from fastapi import FastAPI
     from modules.shared_cmd_options import cmd_opts
 
-    app = FastAPI()
+    app = FastAPI(exception_handlers={Exception: _handle_exception})
     initialize_util.setup_middleware(app)
     api = create_api(app)
 
@@ -83,6 +96,8 @@ def webui_worker():
             elif shared.opts.auto_launch_browser == "Local":
                 auto_launch_browser = not cmd_opts.webui_is_non_local
 
+        from modules_forge.forge_canvas.canvas import canvas_js_root_path
+
         app, local_url, share_url = shared.demo.launch(
             share=cmd_opts.share,
             server_name=initialize_util.gradio_server_name(),
@@ -98,6 +113,7 @@ def webui_worker():
             app_kwargs={
                 "docs_url": "/docs",
                 "redoc_url": "/redoc",
+                "exception_handlers": {Exception: _handle_exception},
             },
             root_path=f"/{cmd_opts.subpath}" if cmd_opts.subpath else "",
         )

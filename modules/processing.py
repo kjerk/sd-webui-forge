@@ -20,6 +20,7 @@ from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infot
 from modules.rng import slerp, get_noise_source_type  # noqa: F401
 from modules.sd_samplers_common import images_tensor_to_samples, decode_first_stage, approximation_indexes
 from modules.shared import opts, cmd_opts, state
+from modules.sysinfo import set_config
 import modules.shared as shared
 import modules.paths as paths
 import modules.face_restoration
@@ -32,7 +33,9 @@ from einops import repeat, rearrange
 from blendmodes.blend import blendLayers, BlendType
 from modules.sd_models import apply_token_merging, forge_model_reload
 from modules_forge.utils import apply_circular_forge
+from modules_forge import main_entry
 from backend import memory_management
+from backend.modules.k_prediction import rescale_zero_terminal_snr_sigmas
 
 
 # some of those options should not be changed at all because they would break the model, so I removed them from options.
@@ -211,6 +214,12 @@ class StableDiffusionProcessing:
 
     latents_after_sampling = []
     pixels_after_sampling = []
+
+    def clear_prompt_cache(self):
+        self.cached_c = [None, None, None]
+        self.cached_uc = [None, None, None]
+        StableDiffusionProcessing.cached_c = [None, None, None]
+        StableDiffusionProcessing.cached_uc = [None, None, None]
 
     def __post_init__(self):
         if self.sampler_index is not None:
@@ -413,6 +422,8 @@ class StableDiffusionProcessing:
 
         return (
             required_prompts,
+            self.distilled_cfg_scale,
+            self.hr_distilled_cfg,
             steps,
             hires_steps,
             use_old_scheduling,
@@ -458,7 +469,7 @@ class StableDiffusionProcessing:
         cache = caches[0]
 
         with devices.autocast():
-            shared.sd_model.set_clip_skip(opts.CLIP_stop_at_last_layers)
+            shared.sd_model.set_clip_skip(int(opts.CLIP_stop_at_last_layers))
 
             cache[1] = function(shared.sd_model, required_prompts, steps, hires_steps, shared.opts.use_old_scheduling)
 
@@ -535,7 +546,7 @@ class Processed:
         self.index_of_first_image = index_of_first_image
         self.styles = p.styles
         self.job_timestamp = state.job_timestamp
-        self.clip_skip = opts.CLIP_stop_at_last_layers
+        self.clip_skip = int(opts.CLIP_stop_at_last_layers)
         self.token_merging_ratio = p.token_merging_ratio
         self.token_merging_ratio_hr = p.token_merging_ratio_hr
 
@@ -707,7 +718,7 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
     if all_negative_prompts is None:
         all_negative_prompts = p.all_negative_prompts
 
-    clip_skip = getattr(p, 'clip_skip', opts.CLIP_stop_at_last_layers)
+    clip_skip = int(getattr(p, 'clip_skip', opts.CLIP_stop_at_last_layers))
     enable_hr = getattr(p, 'enable_hr', False)
     token_merging_ratio = p.get_token_merging_ratio()
     token_merging_ratio_hr = p.get_token_merging_ratio(for_hr=True)
@@ -726,7 +737,9 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
         "CFG scale": p.cfg_scale
     }
 
-    if p.sd_model.use_distilled_cfg_scale:
+    # if hires fix was used, p.firstpass_use_distilled_cfg_scale is appropriately set, otherwise it doesn't exist
+    firstpass_use_distilled_cfg_scale = getattr(p,'firstpass_use_distilled_cfg_scale', p.sd_model.use_distilled_cfg_scale)
+    if firstpass_use_distilled_cfg_scale:
         generation_params['Distilled CFG Scale'] = p.distilled_cfg_scale
 
     noise_source_type = get_noise_source_type()
@@ -740,8 +753,8 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
         "Model": p.sd_model_name if opts.add_model_name_to_info else None,
         "FP8 weight": opts.fp8_storage if devices.fp8 else None,
         "Cache FP16 weight for LoRA": opts.cache_fp16_weight if devices.fp8 else None,
-        "VAE hash": p.sd_vae_hash if opts.add_vae_hash_to_info else None,
-        "VAE": p.sd_vae_name if opts.add_vae_name_to_info else None,
+        # "VAE hash": p.sd_vae_hash if opts.add_vae_hash_to_info else None,
+        # "VAE": p.sd_vae_name if opts.add_vae_name_to_info else None,
         "Variation seed": (None if p.subseed_strength == 0 else (p.all_subseeds[0] if use_main_prompt else all_subseeds[index])),
         "Variation seed strength": (None if p.subseed_strength == 0 else p.subseed_strength),
         "Seed resize from": (None if p.seed_resize_from_w <= 0 or p.seed_resize_from_h <= 0 else f"{p.seed_resize_from_w}x{p.seed_resize_from_h}"),
@@ -758,6 +771,13 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
         "Version": program_version() if opts.add_version_to_infotext else None,
         "User": p.user if opts.add_user_name_to_info else None,
     })
+
+    if shared.opts.forge_unet_storage_dtype != 'Automatic':
+        generation_params['Diffusion in Low Bits'] = shared.opts.forge_unet_storage_dtype
+
+    if isinstance(shared.opts.forge_additional_modules, list) and len(shared.opts.forge_additional_modules) > 0:
+        for i, m in enumerate(shared.opts.forge_additional_modules):
+            generation_params[f'Module {i+1}'] = os.path.splitext(os.path.basename(m))[0]
 
     for key, value in generation_params.items():
         try:
@@ -778,8 +798,7 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
 
 need_global_unload = False
 
-
-def process_images(p: StableDiffusionProcessing) -> Processed:
+def manage_model_and_prompt_cache(p: StableDiffusionProcessing):
     global need_global_unload
 
     p.sd_model, just_reloaded = forge_model_reload()
@@ -787,16 +806,45 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
     if need_global_unload and not just_reloaded:
         memory_management.unload_all_models()
 
+    if need_global_unload:
+        p.clear_prompt_cache()
+
     need_global_unload = False
 
+
+def process_images(p: StableDiffusionProcessing) -> Processed:
+    """applies settings overrides (if any) before processing images, then restores settings as applicable."""
     if p.scripts is not None:
         p.scripts.before_process(p)
+        
+    stored_opts = {k: opts.data[k] if k in opts.data else opts.get_default(k) for k in p.override_settings.keys() if k in opts.data}
 
-    # backwards compatibility, fix sampler and scheduler if invalid
-    sd_samplers.fix_p_invalid_sampler_and_scheduler(p)
+    try:
+        # if no checkpoint override or the override checkpoint can't be found, remove override entry and load opts checkpoint
+        # and if after running refiner, the refiner model is not unloaded - webui swaps back to main model here, if model over is present it will be reloaded afterwards
+        if sd_models.checkpoint_aliases.get(p.override_settings.get('sd_model_checkpoint')) is None:
+            p.override_settings.pop('sd_model_checkpoint', None)
 
-    with profiling.Profiler():
-        res = process_images_inner(p)
+        # apply any options overrides
+        set_config(p.override_settings, is_api=True, run_callbacks=False, save_config=False)
+
+        # load/reload model and manage prompt cache as needed
+        if getattr(p, 'txt2img_upscale', False):
+            # avoid model load from hiresfix quickbutton, as it could be redundant
+            pass
+        else:
+            manage_model_and_prompt_cache(p)
+
+        # backwards compatibility, fix sampler and scheduler if invalid
+        sd_samplers.fix_p_invalid_sampler_and_scheduler(p)
+
+        with profiling.Profiler():
+            res = process_images_inner(p)
+
+    finally:
+        # restore original options
+        if p.override_settings_restore_afterwards:
+            set_config(stored_opts, save_config=False)
 
     return res
 
@@ -882,7 +930,9 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             if state.interrupted or state.stopping_generation:
                 break
 
-            sd_models.reload_model_weights()  # model can be changed for example by refiner
+            if not getattr(p, 'txt2img_upscale', False) or p.hr_checkpoint_name is None:
+                # hiresfix quickbutton may not need reload of firstpass model
+                sd_models.forge_model_reload()  # model can be changed for example by refiner, hiresfix
 
             p.sd_model.forge_objects = p.sd_model.forge_objects_original.shallow_copy()
             p.prompts = p.all_prompts[n * p.batch_size:(n + 1) * p.batch_size]
@@ -928,25 +978,22 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             if p.n_iter > 1:
                 shared.state.job = f"Batch {n+1} out of {p.n_iter}"
 
+            # TODO: This currently seems broken. It should be fixed or removed.
             sd_models.apply_alpha_schedule_override(p.sd_model, p)
 
-            alphas_cumprod_modifiers = p.sd_model.forge_objects.unet.model_options.get('alphas_cumprod_modifiers', [])
-            alphas_cumprod_backup = None
-
-            if len(alphas_cumprod_modifiers) > 0:
-                alphas_cumprod_backup = p.sd_model.alphas_cumprod
-                for modifier in alphas_cumprod_modifiers:
-                    p.sd_model.alphas_cumprod = modifier(p.sd_model.alphas_cumprod)
-                p.sd_model.forge_objects.unet.model.model_sampling.set_sigmas(((1 - p.sd_model.alphas_cumprod) / p.sd_model.alphas_cumprod) ** 0.5)
+            sigmas_backup = None
+            if (opts.sd_noise_schedule == "Zero Terminal SNR" or (hasattr(p.sd_model.model_config, 'ztsnr') and p.sd_model.model_config.ztsnr)) and p is not None:
+                p.extra_generation_params['Noise Schedule'] = opts.sd_noise_schedule
+                sigmas_backup = p.sd_model.forge_objects.unet.model.predictor.sigmas
+                p.sd_model.forge_objects.unet.model.predictor.set_sigmas(rescale_zero_terminal_snr_sigmas(p.sd_model.forge_objects.unet.model.predictor.sigmas))
 
             samples_ddim = p.sample(conditioning=p.c, unconditional_conditioning=p.uc, seeds=p.seeds, subseeds=p.subseeds, subseed_strength=p.subseed_strength, prompts=p.prompts)
 
             for x_sample in samples_ddim:
                 p.latents_after_sampling.append(x_sample)
 
-            if alphas_cumprod_backup is not None:
-                p.sd_model.alphas_cumprod = alphas_cumprod_backup
-                p.sd_model.forge_objects.unet.model.model_sampling.set_sigmas(((1 - p.sd_model.alphas_cumprod) / p.sd_model.alphas_cumprod) ** 0.5)
+            if sigmas_backup is not None:
+                p.sd_model.forge_objects.unet.model.predictor.set_sigmas(sigmas_backup)
 
             if p.scripts is not None:
                 ps = scripts.PostSampleArgs(samples_ddim)
@@ -1111,6 +1158,18 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
     return res
 
 
+def process_extra_images(processed:Processed):
+    """used by API processing functions to ensure extra images are PIL image objects"""
+    extra_images = []
+    for img in processed.extra_images:
+        if isinstance(img, np.ndarray):
+            img = Image.fromarray(img)
+        if not Image.isImageType(img):
+            continue
+        extra_images.append(img)
+    processed.extra_images = extra_images
+
+
 def old_hires_fix_first_pass_dimensions(width, height):
     """old algorithm for auto-calculating first pass size"""
 
@@ -1135,10 +1194,13 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
     hr_resize_x: int = 0
     hr_resize_y: int = 0
     hr_checkpoint_name: str = None
+    hr_additional_modules: list = field(default=None)
     hr_sampler_name: str = None
     hr_scheduler: str = None
     hr_prompt: str = ''
     hr_negative_prompt: str = ''
+    hr_cfg: float = 1.0
+    hr_distilled_cfg: float = 3.5
     force_task_id: str = None
 
     cached_hr_uc = [None, None, None]
@@ -1222,6 +1284,15 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
                 self.extra_generation_params["Hires checkpoint"] = self.hr_checkpoint_info.short_title
 
+            if isinstance(self.hr_additional_modules, list):
+                if self.hr_additional_modules == []:
+                    self.extra_generation_params['Hires Module 1'] = 'Built-in'
+                elif 'Use same choices' in self.hr_additional_modules:
+                    self.extra_generation_params['Hires Module 1'] = 'Use same choices'
+                else:
+                    for i, m in enumerate(self.hr_additional_modules):
+                        self.extra_generation_params[f'Hires Module {i+1}'] = os.path.splitext(os.path.basename(m))[0]
+
             if self.hr_sampler_name is not None and self.hr_sampler_name != self.sampler_name:
                 self.extra_generation_params["Hires sampler"] = self.hr_sampler_name
 
@@ -1235,6 +1306,9 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
             self.extra_generation_params["Hires prompt"] = get_hr_prompt
             self.extra_generation_params["Hires negative prompt"] = get_hr_negative_prompt
+
+            self.extra_generation_params["Hires CFG Scale"] = self.hr_cfg
+            self.extra_generation_params["Hires Distilled CFG Scale"] = None  # set after potential hires model load
 
             self.extra_generation_params["Hires schedule type"] = None  # to be set in sd_samplers_kdiffusion.py
 
@@ -1324,7 +1398,32 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                 decoded_samples = None
 
         with sd_models.SkipWritingToConfig():
-            sd_models.reload_model_weights(info=self.hr_checkpoint_info)
+            fp_checkpoint = getattr(shared.opts, 'sd_model_checkpoint')
+            fp_additional_modules = getattr(shared.opts, 'forge_additional_modules')
+
+            reload = False
+            if 'Use same choices' not in self.hr_additional_modules:
+                modules_changed = main_entry.modules_change(self.hr_additional_modules, save=False, refresh=False)
+                if modules_changed:
+                    reload = True
+
+            if self.hr_checkpoint_name and self.hr_checkpoint_name != 'Use same checkpoint':
+                checkpoint_changed = main_entry.checkpoint_change(self.hr_checkpoint_name, save=False, refresh=False)
+                if checkpoint_changed:
+                    self.firstpass_use_distilled_cfg_scale = self.sd_model.use_distilled_cfg_scale
+                    reload = True
+
+            if reload:
+                try:
+                    main_entry.refresh_model_loading_parameters()
+                    sd_models.forge_model_reload()
+                finally:
+                    main_entry.modules_change(fp_additional_modules, save=False, refresh=False)
+                    main_entry.checkpoint_change(fp_checkpoint, save=False, refresh=False)
+                    main_entry.refresh_model_loading_parameters()
+
+            if self.sd_model.use_distilled_cfg_scale:
+                self.extra_generation_params['Hires Distilled CFG Scale'] = self.hr_distilled_cfg
 
         return self.sample_hr_pass(samples, decoded_samples, seeds, subseeds, subseed_strength, prompts)
 
@@ -1477,14 +1576,19 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         if self.hr_c is not None:
             return
 
-        hr_prompts = prompt_parser.SdConditioning(self.hr_prompts, width=self.hr_upscale_to_x, height=self.hr_upscale_to_y)
-        hr_negative_prompts = prompt_parser.SdConditioning(self.hr_negative_prompts, width=self.hr_upscale_to_x, height=self.hr_upscale_to_y, is_negative_prompt=True)
+        hr_prompts = prompt_parser.SdConditioning(self.hr_prompts, width=self.hr_upscale_to_x, height=self.hr_upscale_to_y, distilled_cfg_scale=self.hr_distilled_cfg)
+        hr_negative_prompts = prompt_parser.SdConditioning(self.hr_negative_prompts, width=self.hr_upscale_to_x, height=self.hr_upscale_to_y, is_negative_prompt=True, distilled_cfg_scale=self.hr_distilled_cfg)
 
         sampler_config = sd_samplers.find_sampler_config(self.hr_sampler_name or self.sampler_name)
         steps = self.hr_second_pass_steps or self.steps
         total_steps = sampler_config.total_steps(steps) if sampler_config else steps
 
-        self.hr_uc = self.get_conds_with_caching(prompt_parser.get_learned_conditioning, hr_negative_prompts, self.firstpass_steps, [self.cached_hr_uc, self.cached_uc], self.hr_extra_network_data, total_steps)
+        if self.hr_cfg == 1:
+            self.hr_uc = None
+            print('Skipping unconditional conditioning (HR pass) when CFG = 1. Negative Prompts are ignored.')
+        else:
+            self.hr_uc = self.get_conds_with_caching(prompt_parser.get_learned_conditioning, hr_negative_prompts, self.firstpass_steps, [self.cached_hr_uc, self.cached_uc], self.hr_extra_network_data, total_steps)
+
         self.hr_c = self.get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, hr_prompts, self.firstpass_steps, [self.cached_hr_c, self.cached_c], self.hr_extra_network_data, total_steps)
 
     def setup_conds(self):
@@ -1547,6 +1651,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
     initial_noise_multiplier: float = None
     latent_mask: Image = None
     force_task_id: str = None
+
+    hr_distilled_cfg: float = 3.5       #   needed here for cached_params
 
     image_mask: Any = field(default=None, init=False)
 

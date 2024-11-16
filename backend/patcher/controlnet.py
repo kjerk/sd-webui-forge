@@ -431,14 +431,14 @@ class ControlLora(ControlNet):
 
         dtype = model.storage_dtype
 
-        if dtype in ['nf4', 'fp4']:
+        if dtype in ['nf4', 'fp4', 'gguf']:
             dtype = torch.float16
 
         controlnet_config["dtype"] = dtype
 
         self.manual_cast_dtype = model.computation_dtype
 
-        with using_forge_operations(operations=ControlLoraOps, dtype=dtype):
+        with using_forge_operations(operations=ControlLoraOps, dtype=dtype, manual_cast_enabled=self.manual_cast_dtype != dtype):
             self.control_model = cldm.ControlNet(**controlnet_config)
 
         self.control_model.to(device=memory_management.get_torch_device(), dtype=dtype)
