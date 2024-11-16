@@ -56,7 +56,7 @@ jobs:
           pip install ${{ env.URL_FLASH_ATT }}
           pip install -r ${{ env.DIR_WEBUI }}/requirements_versions.txt
           pip install git+https://github.com/openai/CLIP.git
-          pip install open_clip_torch bitsandbytes
+          pip install --upgrade open_clip_torch bitsandbytes
           conda clean --all -y
           pip cache purge
           pip show xformers
@@ -92,13 +92,13 @@ jobs:
       - name: Create 7z Archive (tag)
         if: ${{ github.event_name == 'push' }}
         run: |
-          7z a -t7z -m0=lzma2 -mx7 -mmt4 -md=64m -ms=on "./sd_forge_${{ github.ref_name }}.7z" ./*
+          7z a -t7z -m0=lzma2 -mx7 -mmt4 -md=64m -ms=on "./sd-webui-forge-${{ github.ref_name }}.7z" ./*
       
       # ? For Flow Triggered
       - name: Create 7z Archive (manual)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
-          7z a -t7z -m0=lzma2 -mx7 -mmt4 -md=64m -ms=on "./sd_forge_${{ github.event.inputs.release_name }}.7z" ./*
+          7z a -t7z -m0=lzma2 -mx7 -mmt4 -md=64m -ms=on "./sd-webui-forge-${{ github.event.inputs.release_name }}.7z" ./*
 
       # ! 8. Create a release and attach the package
       # ? For Tag Pushes
@@ -107,7 +107,7 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           name: Forge Release ${{ github.ref_name }}
-          artifacts: "sd_forge_${{ github.ref_name }}.7z"
+          artifacts: "sd-webui-forge-${{ github.ref_name }}.7z"
           tag: ${{ github.ref_name }}
       
       # ? For Flow Triggered
@@ -116,5 +116,5 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           name: Forge Release ${{ github.event.inputs.release_name }}
-          artifacts: "sd_forge_${{ github.event.inputs.release_name }}.7z"
+          artifacts: "sd-webui-forge-${{ github.event.inputs.release_name }}.7z"
           tag: ${{ github.event.inputs.release_name }}
