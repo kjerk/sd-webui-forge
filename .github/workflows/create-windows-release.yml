@@ -51,13 +51,13 @@ jobs:
         run: |
           .\${{ env.DIR_MINIFORGE }}\condabin\mamba.bat create -n ${{ env.MINIFORGE_ENV_NAME }} python==${{ env.MINIFORGE_ENV_PYTHON }} -y
           .\${{ env.DIR_MINIFORGE }}\shell\condabin\conda-hook.ps1
-          mamba activate ${{ env.MINIFORGE_ENV_NAME }}
+          conda activate ${{ env.MINIFORGE_ENV_NAME }}
           pip install ${{ env.PYTORCH_INSTALL }}
           pip install ${{ env.URL_FLASH_ATT }}
           pip install -r ${{ env.DIR_WEBUI }}/requirements_versions.txt
           pip install git+https://github.com/openai/CLIP.git
           pip install open_clip_torch bitsandbytes
-          mamba clean --all -y
+          conda clean --all -y
           pip cache purge
           pip show xformers
           pip show torch
