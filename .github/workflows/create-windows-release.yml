@@ -63,8 +63,8 @@ jobs:
           pip show torch
           python -m xformers.info
 
-      # ! 4. Init sub repositories
-      - name: Initialize Repo Subrepositories
+      # ! 4. Init sub repos from their main branches
+      - name: Initialize sub-repositories
         run: |
           mkdir ${{ env.DIR_WEBUI }}\repositories
           cd ${{ env.DIR_WEBUI }}\repositories
@@ -80,7 +80,7 @@ jobs:
       - name: Cleanup Repo Subrepositories
         run: |
           cd ${{ env.DIR_WEBUI }}\repositories
-          for /d %G in (*) do if exist "%G\.git" rmdir /s /q "%G\.git"
+          Get-ChildItem -Path . -Directory -Filter '.git' -Recurse | Remove-Item -Recurse -Force
 
       # ! 5. Add launcher scripts (copy files from .github/workflow_resources/windows-deploy to root)
       - name: Add launcher scripts
