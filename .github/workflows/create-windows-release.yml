@@ -10,9 +10,9 @@ env:
   MINIFORGE_ENV_NAME: "sd-forge"
   MINIFORGE_ENV_PYTHON: "3.11.09"
 
-  PYTORCH_INSTALL: "torch==2.4.1 torchvision torchaudio xformers --index-url https://download.pytorch.org/whl/cu121"
+  PYTORCH_INSTALL: "torch==2.4.0 torchvision torchaudio xformers --index-url https://download.pytorch.org/whl/cu121"
 
-  URL_FLASH_ATT: "https://github.com/oobabooga/flash-attention/releases/download/v2.6.3/flash_attn-2.6.3+cu122torch2.4.1cxx11abiFALSE-cp311-cp311-win_amd64.whl"
+  URL_FLASH_ATT: "https://github.com/oobabooga/flash-attention/releases/download/v2.6.3/flash_attn-2.6.3+cu122torch2.4.0cxx11abiFALSE-cp311-cp311-win_amd64.whl"
   URL_MINIFORGE: "https://github.com/conda-forge/miniforge/releases/download/24.3.0-0/Miniforge3-24.3.0-0-Windows-x86_64.exe"
 
 on:
@@ -51,13 +51,13 @@ jobs:
         run: |
           .\${{ env.DIR_MINIFORGE }}\condabin\mamba.bat create -n ${{ env.MINIFORGE_ENV_NAME }} python==${{ env.MINIFORGE_ENV_PYTHON }} -y
           .\${{ env.DIR_MINIFORGE }}\shell\condabin\conda-hook.ps1
-          conda activate ${{ env.MINIFORGE_ENV_NAME }}
+          mamba activate ${{ env.MINIFORGE_ENV_NAME }}
           pip install ${{ env.PYTORCH_INSTALL }}
           pip install ${{ env.URL_FLASH_ATT }}
           pip install -r ${{ env.DIR_WEBUI }}/requirements_versions.txt
           pip install git+https://github.com/openai/CLIP.git
           pip install open_clip_torch bitsandbytes
-          conda clean --all -y
+          mamba clean --all -y
           pip cache purge
           pip show xformers
           pip show torch
